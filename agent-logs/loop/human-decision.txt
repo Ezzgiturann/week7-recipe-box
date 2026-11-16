@@ -1,0 +1,4 @@
+İNSAN KARARI (orkestratör, 5 onaysız turdan sonra):
+- Baştaki miktardan sonra aynı satırda ikinci bir miktar varsa (ör. "1 lb 4 oz beef", "1 cup plus 2 tbsp flour", "3 eggs or 4 egg whites") satırı ölçekleme; metni olduğu gibi bırak ve unscaled listesine ekle.
+- Bunun için tek tek yeni regex kalıpları eklemek yerine genel bir kural kullan: baştaki miktardan sonra kalan metinde başka bir sayı varsa ve bu sayı bilinçli olarak desteklenen bir biçimin (aralık, karışık sayı vb.) parçası değilse satır unscaled olur.
+- Desteklenmeyen ve unscaled'a düşen kalıpları scale_ingredient docstring'inde açıkça listele. Bu sınırlamalar kabul edilmiş sayılır.

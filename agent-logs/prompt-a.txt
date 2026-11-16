@@ -1,0 +1,19 @@
+docs/TASKS.md'deki task 1'i (Shopping list) implement et.
+
+GET /shopping-list?ids=1,2,3 verilen tariflerin malzemelerini birleştirip tekrarsız bir liste döndürsün.
+Örnek response: {"items": ["flour", "milk"]}
+
+Kurallar:
+- Tekrar tespitinde büyük/küçük harf ve baştaki/sondaki boşluklar yok sayılsın.
+- "200 g flour" ile "100 g flour" ayrı satırlar olarak kalsın.
+- Sıralama ilk görüldüğü sıraya göre olsun.
+- Olmayan bir tarif ID'si varsa 404 dönsün.
+- ids boş veya "1,abc" gibi bozuksa 422 dönsün.
+
+Kapsam:
+- Sadece main.py ve test_main.py'yi değiştir. Mevcut endpoint'lere dokunma.
+- Yeni testleri test_main.py'nin sonuna "# --- Shopping list ---" başlığıyla ekle.
+- Testler gerçek recipes.db yerine geçici bir veritabanı kullansın.
+- Commit atma.
+
+Tamamlanma kriteri: pytest geçmeli. Aldığın kararları kısaca açıkla.

@@ -1,0 +1,22 @@
+docs/TASKS.md'deki task 3'ü (Ingredient scaling) implement et.
+
+GET /recipes/{id}/scaled?factor=2 endpoint'i, tarifin malzeme miktarlarını verilen factor ile çarparak yeni bir response döndürsün.
+
+Kurallar:
+- Factor pozitif olmalı ve 0'dan büyük, 10'a eşit veya küçük olmalı. Geçersiz değerlerde 422 dönsün.
+- Kesirli miktarlar desteklensin. Örneğin "1/2 cup milk" factor 2 ile "1 cup milk" olsun.
+- Ondalık miktarlar desteklensin.
+- Miktarı olmayan malzemeler (ör. "salt to taste") değiştirilmeden kalsın.
+- Sonuçlar gereksiz ondalık sıfırlar olmadan gösterilsin. Örneğin 2.0 yerine 2, 0.5 ise 0.5 olarak gösterilsin.
+- Tarif bulunamazsa 404 dönsün.
+- Orijinal tarif ve veritabanındaki malzeme değerleri değişmesin.
+
+Kapsam:
+- Sadece main.py ve test_main.py dosyalarını değiştir.
+- Testler gerçek veritabanı yerine geçici bir veritabanı kullansın.
+- Commit atma.
+
+Tamamlanma kriteri:
+- pytest geçmeli.
+- Her kural ve önemli edge case için test ekle.
+- Yaptığın değişiklikleri ve aldığın kararları kısaca açıkla.

@@ -1,0 +1,18 @@
+docs/TASKS.md'deki task 2'yi (Tag filter) implement et.
+
+GET /recipes?tag=breakfast sadece o etikete sahip tarifleri döndürsün.
+tag parametresi verilmezse mevcut davranış (tüm tarifler) aynen korunsun.
+
+Kurallar:
+- Etiket eşleşmesi büyük/küçük harfe duyarsız olsun.
+- Birden fazla etiket (?tag=a&tag=b) verilirse herhangi birine sahip olan tarifler dönsün (VEYA).
+- Hiçbir tarif eşleşmezse boş liste [] dönsün (404 değil).
+- tag="" (boş) gelirse 422 dönsün.
+
+Kapsam:
+- Sadece main.py ve test_main.py'yi değiştir. Diğer endpoint'lere dokunma.
+- Yeni testleri test_main.py'nin sonuna "# --- Tag filter ---" başlığıyla ekle.
+- Testler gerçek recipes.db yerine geçici bir veritabanı kullansın.
+- Commit atma.
+
+Tamamlanma kriteri: pytest geçmeli. Aldığın kararları kısaca açıkla.

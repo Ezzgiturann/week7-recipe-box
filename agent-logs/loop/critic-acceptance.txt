@@ -1,0 +1,2 @@
+--- ORKESTRATÖRÜN KABUL KRİTERİ (İNSAN KARARI) ---
+Belirsiz veya desteklenmeyen bir satırın metni değiştirilmeden bırakılıp response'taki unscaled listesinde raporlanıyorsa ve bu sınırlama docstring'de belgelendiyse, bu kabul edilmiş bir sınırlamadır ve tek başına Correctness FAIL sebebi değildir. Correctness FAIL yalnızca SESSİZCE yanlış bir sonuç için verilmeli: unscaled listesinde raporlanmayan yanlış bir sayı, ya da prompt'taki açık bir kuralın ihlali.
