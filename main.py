@@ -11,11 +11,12 @@ Test:
     pytest
 """
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -93,3 +94,38 @@ def get_recipe(recipe_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="unknown recipe")
     return _row_to_recipe(row)
+
+
+def _parse_ids(raw: str) -> list[int]:
+    """Parse "1,2,3" into [1, 2, 3]; raise 422 on empty or malformed input."""
+    parts = [p.strip() for p in raw.split(",")]
+    if not all(re.fullmatch(r"[0-9]+", p) for p in parts):
+        raise HTTPException(status_code=422, detail="ids must be a comma-separated list of integers")
+    return [int(p) for p in parts]
+
+
+@app.get("/shopping-list")
+def shopping_list(ids: str = Query(...)):
+    recipe_ids = _parse_ids(ids)
+    with closing(get_db()) as conn:
+        rows = {
+            row["id"]: row
+            for row in conn.execute(
+                f"SELECT * FROM recipes WHERE id IN ({','.join('?' * len(recipe_ids))})",
+                recipe_ids,
+            )
+        }
+    missing = [rid for rid in recipe_ids if rid not in rows]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"unknown recipe ids: {missing}")
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for rid in recipe_ids:  # follow the order given in the query string
+        for ingredient in json.loads(rows[rid]["ingredients"]):
+            cleaned = ingredient.strip()
+            key = cleaned.casefold()
+            if cleaned and key not in seen:
+                seen.add(key)
+                items.append(cleaned)
+    return {"items": items}
