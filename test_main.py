@@ -1,11 +1,16 @@
+import atexit
+import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
 
 # Point the app at a throwaway DB *before* importing main, because main
 # calls init_db() at import time and would otherwise create ./recipes.db.
-os.environ["RECIPE_BOX_DB"] = str(Path(tempfile.mkdtemp()) / "import.db")
+_IMPORT_DB_DIR = tempfile.mkdtemp()
+atexit.register(shutil.rmtree, _IMPORT_DB_DIR, ignore_errors=True)
+os.environ["RECIPE_BOX_DB"] = str(Path(_IMPORT_DB_DIR) / "import.db")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -90,13 +95,13 @@ def test_scaled_returns_full_recipe_with_factor():
     [
         # integers
         ("200 g flour", 2, "400 g flour"),
-        ("3 eggs", 1, "3 eggs"),
         ("200g flour", 1.5, "300g flour"),  # unit glued to number
+        ("  2 g salt", 2, "  4 g salt"),  # leading whitespace preserved
         # fractions
         ("1/2 cup milk", 2, "1 cup milk"),
         ("1/2 cup milk", 3, "1.5 cup milk"),
         ("1/3 cup sugar", 3, "1 cup sugar"),  # exact math, no 0.99
-        ("1/3 cup sugar", 1, "0.33 cup sugar"),
+        ("1/3 cup sugar", 2, "0.67 cup sugar"),
         ("1 1/2 cups water", 2, "3 cups water"),  # mixed number
         # decimals
         ("1.5 tsp salt", 2, "3 tsp salt"),
@@ -104,10 +109,15 @@ def test_scaled_returns_full_recipe_with_factor():
         (".5 cup oil", 3, "1.5 cup oil"),
         ("2.5 kg potatoes", 0.1, "0.25 kg potatoes"),
         # trailing zeros stripped / rounding
-        ("2.0 cups rice", 1, "2 cups rice"),
-        ("1.50 tbsp butter", 1, "1.5 tbsp butter"),
+        ("1.0 cups rice", 2, "2 cups rice"),
+        ("0.750 tbsp butter", 2, "1.5 tbsp butter"),
         ("10 g yeast", 0.333, "3.33 g yeast"),
-        ("1 g saffron", 0.001, "0.001 g saffron"),  # tiny amounts don't become 0
+        # small amounts: 2 significant digits, never collapse to 0 or double
+        ("1 g saffron", 0.001, "0.001 g saffron"),
+        ("1 g saffron", 0.005, "0.005 g saffron"),
+        ("1 g saffron", 0.004, "0.004 g saffron"),
+        ("1 g saffron", 0.0123, "0.012 g saffron"),
+        ("1 g saffron", 0.995, "1 g saffron"),  # rounds up cleanly, no "1.0"
         # factor upper bound is allowed
         ("1 onion", 10, "10 onion"),
     ],
@@ -127,6 +137,8 @@ def test_scaling_values(ingredient, factor, expected):
         "a pinch of nutmeg",
         "",
         "1/0 cup nonsense",  # invalid fraction is left alone, not a crash
+        "2 1/0 cup nonsense",  # mixed number with zero denominator
+        "½ cup cream",  # unicode fraction only: no ASCII quantity to scale
     ],
 )
 def test_ingredients_without_quantity_unchanged(ingredient):
@@ -134,6 +146,62 @@ def test_ingredients_without_quantity_unchanged(ingredient):
     r = _scaled(rid, 2)
     assert r.status_code == 200
     assert r.json()["ingredients"] == [ingredient]
+
+
+@pytest.mark.parametrize(
+    "ingredient",
+    [
+        # ranges: scaling only the first bound would give "2-2"
+        "1-2 cloves garlic",
+        "1 - 2 cloves garlic",
+        "1–2 cloves garlic",  # en dash
+        "1 to 2 cups stock",
+        "2 or 3 eggs",
+        "1/2-1 cup milk",
+        # decimal comma vs thousands separator is ambiguous ("1,5" vs "1,000")
+        "1,5 kg un",
+        "1,000 g sugar",
+        # unicode fractions attached to a number
+        "1½ cups flour",
+        "1 ½ cups flour",
+        # dimensions / multipliers
+        "2x3 cm pieces",
+        "2 x 400 g cans tomatoes",
+        "2 × 400 g cans tomatoes",
+        # a second quantity in parentheses would stay unscaled
+        "12 oz (340 g) pasta",
+        # malformed leftovers
+        "2 1/2/3 cups",
+    ],
+)
+def test_ambiguous_quantities_unchanged(ingredient):
+    """Unsupported formats are left as-is rather than scaled to a wrong amount."""
+    rid = _create([ingredient])
+    r = _scaled(rid, 2)
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == [ingredient]
+
+
+@pytest.mark.parametrize(
+    "ingredient, expected",
+    [
+        # words that merely *start* like the ambiguity markers still scale
+        ("2 tomatoes", "4 tomatoes"),
+        ("2 oranges", "4 oranges"),
+        ("2 xl eggs", "4 xl eggs"),
+        ("2 eggs, beaten", "4 eggs, beaten"),
+        ("1/2 cup milk (whole)", "1 cup milk (whole)"),
+    ],
+)
+def test_ambiguity_check_has_no_false_positives(ingredient, expected):
+    rid = _create([ingredient])
+    assert _scaled(rid, 2).json()["ingredients"] == [expected]
+
+
+@pytest.mark.parametrize("ingredient", ["1/3 cup sugar", "2.0 cups rice", "1-2 cloves"])
+def test_factor_one_is_identity(ingredient):
+    rid = _create([ingredient])
+    assert _scaled(rid, 1).json()["ingredients"] == [ingredient]
 
 
 def test_only_leading_quantity_is_scaled():
@@ -193,7 +261,7 @@ def test_scaling_does_not_modify_original(temp_db):
     # and directly in the database
     with sqlite3.connect(temp_db) as conn:
         stored = conn.execute("SELECT ingredients FROM recipes WHERE id = ?", (rid,)).fetchone()[0]
-    assert stored == main.json.dumps(ingredients)
+    assert json.loads(stored) == ingredients
 
 
 def test_repeated_scaling_is_not_cumulative():

@@ -116,6 +116,24 @@ _QUANTITY_RE = re.compile(
     r"(?![\d/.])"  # don't stop mid-token (e.g. "1.2.3", "1/2/3")
 )
 
+_UNICODE_FRACTIONS = "¼-¾⅐-⅞"  # ¼ ½ ¾ ⅐ … ⅞
+
+# Text right after the leading number that makes the quantity ambiguous.
+# Scaling only the first number would silently produce a *wrong* amount, so
+# such lines are returned unchanged instead (same policy as "1/0 cup").
+_AMBIGUOUS_AFTER_RE = re.compile(
+    r"^(?:"
+    r",\d"                                   # "1,5 kg" (decimal comma) / "1,000 g"
+    rf"|\s*[{_UNICODE_FRACTIONS}]"           # "1½ cups", "1 ½ cups"
+    rf"|\s*(?:[-–—~]|to\b|or\b)\s*[\d.{_UNICODE_FRACTIONS}]"  # "1-2", "1 to 2"
+    r"|\s*[x×]\s*\d"                    # "2x3 cm", "2 × 400 g"
+    r"|\s*\d+/"                              # leftovers like "2 1/2/3"
+    r")",
+    re.IGNORECASE,
+)
+# A second quantity in parentheses, e.g. "12 oz (340 g) pasta".
+_PAREN_QUANTITY_RE = re.compile(r"\(\s*[\d.]")
+
 
 def _parse_quantity(match: re.Match) -> Optional[Fraction]:
     """Turn a regex match into an exact Fraction; None if it's not a valid number."""
@@ -133,28 +151,43 @@ def _parse_quantity(match: re.Match) -> Optional[Fraction]:
 
 
 def _format_quantity(value: Fraction) -> str:
-    """Render without trailing zeros: 2 -> "2", 1/2 -> "0.5", 1/3 -> "0.33"."""
+    """Render a positive quantity without trailing zeros.
+
+    One rule: keep at least 2 decimal places, and for values below 1 keep
+    2 significant digits, so small amounts never collapse or double:
+
+        2 -> "2"      1/2 -> "0.5"     1/3 -> "0.33"    10/3 -> "3.33"
+        0.005 -> "0.005"   0.0123 -> "0.012"   0.995 -> "1"
+    """
     if value.denominator == 1:
         return str(value.numerator)
     exact = Decimal(value.numerator) / Decimal(value.denominator)
-    rounded = exact.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if rounded == 0:
-        # Very small amounts (tiny factors) shouldn't collapse to "0".
-        rounded = Decimal(f"{exact:.2g}")
-    text = format(rounded.normalize(), "f")
+    # adjusted() is the exponent of the leading digit: 0.005 -> -3, 3.3 -> 0.
+    places = max(2, 1 - exact.adjusted())
+    rounded = exact.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    text = format(rounded, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def scale_ingredient(ingredient: str, factor: Fraction) -> str:
-    """Scale the leading quantity of an ingredient line; leave others untouched."""
+    """Scale the leading quantity of an ingredient line; leave others untouched.
+
+    Lines are returned unchanged when there is no quantity ("salt to taste"),
+    the quantity is invalid ("1/0 cup"), or it is ambiguous ("1-2 cloves",
+    "1,5 kg", "1½ cups", "12 oz (340 g)") – a wrong amount is worse than none.
+    """
+    if factor == 1:
+        return ingredient  # identity: don't reformat "1/3 cup" as "0.33 cup"
     match = _QUANTITY_RE.match(ingredient)
     if match is None:
-        return ingredient  # e.g. "salt to taste"
+        return ingredient
+    rest = ingredient[match.end():]
+    if _AMBIGUOUS_AFTER_RE.match(rest) or _PAREN_QUANTITY_RE.search(rest):
+        return ingredient
     quantity = _parse_quantity(match)
     if quantity is None:
-        return ingredient  # e.g. "1/0 cup" – not a real quantity, don't guess
-    scaled = _format_quantity(quantity * factor)
-    return match["lead"] + scaled + ingredient[match.end():]
+        return ingredient
+    return match["lead"] + _format_quantity(quantity * factor) + rest
 
 
 @app.get("/recipes/{recipe_id}/scaled")
