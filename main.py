@@ -131,19 +131,16 @@ _QUANTITY_RE = re.compile(
     r"(?![\d/⁄.])",  # don't stop mid-token (e.g. "1.2.3", "1/2/3")
     re.IGNORECASE,
 )
-# Starts like a quantity but _QUANTITY_RE can't read it ("1.2.3", "1/2/3",
-# "-2 g"): reported as unscaled rather than treated as "no quantity".
-_LOOKS_NUMERIC_RE = re.compile(rf"^\s*[-+−]?\s*\.?[\d{_UNICODE_FRACTIONS}]")
-
 # Longer quantities are not real recipe amounts; refusing them also keeps us
 # clear of Python 3.11+'s 4300-digit int<->str limit (ValueError -> HTTP 500).
 _MAX_QUANTITY_DIGITS = 100
 
-# General rule: any digit or fraction left *after* the supported leading
-# quantity means a second number we don't understand ("1 lb 4 oz", "12 oz
-# (340 g)", "1,5 kg", "2x3 cm", "1-2-3"). Scaling only the first number would
-# give a wrong amount, so the line is reported instead.
-_SECOND_NUMBER_RE = re.compile(rf"[\d{_UNICODE_FRACTIONS}]")
+# General rule: a digit or fraction anywhere that is not part of the supported
+# leading quantity is a number we don't understand – after it ("1 lb 4 oz",
+# "12 oz (340 g)", "1,5 kg", "2x3 cm") or with no readable leading quantity
+# at all ("flour 200 g", "Eggs: 2", "~2 cups", "1.2.3", "-2 g"). Such lines are
+# reported instead of being scaled wrongly or passed off as "no quantity".
+_ANY_NUMBER_RE = re.compile(rf"[\d{_UNICODE_FRACTIONS}]")
 
 # The leading number is there but is not an amount of the ingredient.
 _NOT_AN_AMOUNT_RE = re.compile(
@@ -211,9 +208,12 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
 
     Returns:
       * the scaled line;
-      * the line unchanged if it has no leading quantity ("salt to taste");
+      * the line unchanged if it contains no digits or fractions at all
+        ("salt to taste", "a pinch of nutmeg");
       * None if it can't be scaled safely. The caller reports these in
         "unscaled" instead of returning a wrong amount. Accepted limitations:
+          - quantity not at the start: "flour 200 g", "Eggs: 2",
+            "a 400 g can tomatoes", "about 2 cups", "~2 cups", "V8 juice"
           - another number after the quantity: "1 lb 4 oz beef",
             "1 cup plus 2 tbsp", "3 eggs or 4 egg whites", "12 oz (340 g)",
             "2 x 400 g cans", "2x3 cm", "1 2-inch piece", "1-2-3 eggs",
@@ -222,15 +222,21 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
           - not an amount: "2-inch piece", "3-ounce can", "70% cocoa", "180°C"
           - unreadable / invalid: "1.2.3 cups", "1/2/3", "1e3 g", "1/0 cup",
             "-2 g", reversed range "2-1 cups", more than 100 digits
+
+    Not detected (returned unchanged and *not* reported): amounts written as
+    words, e.g. "two eggs", "half a lemon"; in "2 cups plus one tbsp" only the
+    "2" is scaled. Ambiguous hyphens are read as mixed numbers: "2-3/4" is
+    2 3/4, not the range 2 to 3/4. Results keep 2 decimals (2 significant
+    digits below 1), so "1/8 tsp" becomes "0.13 tsp" even at factor 1.
     """
     match = _QUANTITY_RE.match(ingredient)
     if match is None:
-        # "salt to taste" has no quantity; "1.2.3 cups" has an unreadable one.
-        return None if _LOOKS_NUMERIC_RE.match(ingredient) else ingredient
+        # No readable leading quantity: fine only if there's no number at all.
+        return None if _ANY_NUMBER_RE.search(ingredient) else ingredient
     if sum(c.isdigit() for c in match.group()) > _MAX_QUANTITY_DIGITS:
         return None
     rest = ingredient[match.end():]
-    if _SECOND_NUMBER_RE.search(rest) or _NOT_AN_AMOUNT_RE.match(rest):
+    if _ANY_NUMBER_RE.search(rest) or _NOT_AN_AMOUNT_RE.match(rest):
         return None
     low = _parse_number(match["low"])
     high = _parse_number(match["high"]) if match["high"] else None
