@@ -16,7 +16,7 @@ import re
 import sqlite3
 import unicodedata
 from contextlib import closing
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 from typing import Optional, Union
@@ -109,14 +109,16 @@ def get_recipe(recipe_id: int):
 # --- Ingredient scaling -----------------------------------------------------
 
 _UNICODE_FRACTIONS = "¼-¾⅐-⅞"  # ¼ ½ ¾ ⅐ … ⅞
+_SLASH = "[/⁄]"  # ASCII "/" or the Unicode fraction slash "⁄"
 _RANGE_SEP = r"(?:[-–—~]|to\b|or\b)"  # "-", "–", "—", "~", "to", "or"
 
-# One number: mixed ("1 1/2", "1½", "1 ½"), fraction ("1/2", "½"),
-# or integer/decimal ("200", "1.5", ".5"). Longest forms are tried first.
+# One number: mixed ("1 1/2", "1-1/2", "1½", "1 ½"), fraction ("1/2", "½"),
+# or integer/decimal ("200", "1.5", ".5"). Longest forms are tried first, so
+# the US-style "1-1/2" is read as one-and-a-half, not as the range 1 to 1/2.
 _NUMBER = (
-    r"(?:\d+\s+\d+/\d+"
+    rf"(?:\d+(?:\s+|-)\d+{_SLASH}\d+"
     rf"|\d+\s*[{_UNICODE_FRACTIONS}]"
-    r"|\d+/\d+"
+    rf"|\d+{_SLASH}\d+"
     rf"|[{_UNICODE_FRACTIONS}]"
     r"|\d+(?:\.\d+)?|\.\d+)"
 )
@@ -127,9 +129,12 @@ _QUANTITY_RE = re.compile(
     r"^(?P<lead>\s*)"
     rf"(?P<low>{_NUMBER})"
     rf"(?:(?P<sep>\s*{_RANGE_SEP}\s*)(?P<high>{_NUMBER}))?"
-    r"(?![\d/.])",  # don't stop mid-token (e.g. "1.2.3", "1/2/3")
+    r"(?![\d/⁄.])",  # don't stop mid-token (e.g. "1.2.3", "1/2/3")
     re.IGNORECASE,
 )
+# Starts like a quantity but _QUANTITY_RE can't read it ("1.2.3", "1/2/3"):
+# reported as unscaled rather than treated as "no quantity".
+_LOOKS_NUMERIC_RE = re.compile(rf"^\s*[\d{_UNICODE_FRACTIONS}]")
 
 # Text right after the quantity that makes it ambiguous. Such lines are left
 # unchanged *and reported* in the response's "unscaled" list.
@@ -140,15 +145,16 @@ _AMBIGUOUS_AFTER_RE = re.compile(
     r"|[-–]\s*[^\W\d_]"                        # a size, not a count: "2-inch", "3-ounce"
     rf"|\s*{_RANGE_SEP}\s*[\d.{_UNICODE_FRACTIONS}]"  # three-part "1-2-3"
     r"|\s*[x×]\s*\d"                           # dimensions / multipliers: "2x3 cm"
-    r"|\s*\d+/"                                     # leftovers like "2 1/2/3"
+    rf"|\s*\d+{_SLASH}"                             # leftovers like "2 1/2/3", "1 1⁄2⁄3"
+    r"|e[-+]?\d"                                    # scientific notation: "1e3 g"
     r")",
     re.IGNORECASE,
 )
 # A second quantity in parentheses, e.g. "12 oz (340 g) pasta".
 _PAREN_QUANTITY_RE = re.compile(r"\(\s*[\d.]")
 
-_MIXED_RE = re.compile(r"(\d+)\s+(\d+)/(\d+)")
-_FRACTION_RE = re.compile(r"(\d+)/(\d+)")
+_MIXED_RE = re.compile(rf"(\d+)(?:\s+|-)(\d+){_SLASH}(\d+)")
+_FRACTION_RE = re.compile(rf"(\d+){_SLASH}(\d+)")
 _UNICODE_MIXED_RE = re.compile(rf"(\d*)\s*([{_UNICODE_FRACTIONS}])")
 
 
@@ -181,10 +187,15 @@ def _format_quantity(value: Fraction) -> str:
     """
     if value.denominator == 1:
         return str(value.numerator)
-    exact = Decimal(value.numerator) / Decimal(value.denominator)
-    # adjusted() is the exponent of the leading digit: 0.005 -> -3, 3.3 -> 0.
-    places = max(2, 1 - exact.adjusted())
-    rounded = exact.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    with localcontext() as ctx:
+        # Enough precision for any input size: the default 28 digits makes
+        # quantize() raise InvalidOperation on huge amounts (HTTP 500).
+        int_digits = len(str(value.numerator // value.denominator))
+        ctx.prec = max(28, int_digits + 2 * len(str(value.denominator)) + 10)
+        exact = Decimal(value.numerator) / Decimal(value.denominator)
+        # adjusted() is the exponent of the leading digit: 0.005 -> -3, 3.3 -> 0.
+        places = max(2, 1 - exact.adjusted())
+        rounded = exact.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
     text = format(rounded, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
@@ -196,12 +207,14 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
       * the scaled line: "1/2 cup milk" x2 -> "1 cup milk", "1-2 cloves" x2 -> "2-4 cloves";
       * the line unchanged if it has no leading quantity ("salt to taste");
       * None if it starts with a quantity that can't be scaled safely
-        ("1,5 kg", "2-inch piece", "12 oz (340 g)", "1/0 cup"). The caller
+        ("1,5 kg", "2-inch piece", "12 oz (340 g)", "1/0 cup", "1.2.3 cups",
+        "2-1 cups"). The caller
         reports these instead of silently returning a wrong amount.
     """
     match = _QUANTITY_RE.match(ingredient)
     if match is None:
-        return ingredient
+        # "salt to taste" has no quantity; "1.2.3 cups" has an unreadable one.
+        return None if _LOOKS_NUMERIC_RE.match(ingredient) else ingredient
     rest = ingredient[match.end():]
     if _AMBIGUOUS_AFTER_RE.match(rest) or _PAREN_QUANTITY_RE.search(rest):
         return None
@@ -209,6 +222,8 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
     high = _parse_number(match["high"]) if match["high"] else None
     if low is None or (match["high"] and high is None):
         return None
+    if high is not None and not low < high:
+        return None  # "2-1 cups" is not a meaningful range
     scaled = _format_quantity(low * factor)
     if high is not None:
         scaled += match["sep"] + _format_quantity(high * factor)

@@ -142,6 +142,11 @@ def test_factor_is_echoed_without_trailing_zeros(factor, raw):
         ("1/3 cup sugar", 3, "1 cup sugar"),  # exact math, no 0.99
         ("1/3 cup sugar", 2, "0.67 cup sugar"),
         ("1 1/2 cups water", 2, "3 cups water"),  # mixed number
+        ("1-1/2 cups flour", 2, "3 cups flour"),  # US hyphenated mixed number
+        # unicode fraction slash U+2044
+        ("1⁄2 cup milk", 2, "1 cup milk"),
+        ("1 1⁄2 cups flour", 2, "3 cups flour"),
+        ("1-1⁄2 cups flour", 2, "3 cups flour"),
         # unicode fractions
         ("½ cup cream", 2, "1 cup cream"),
         ("⅓ cup oil", 3, "1 cup oil"),
@@ -183,10 +188,29 @@ def test_scaling_values(ingredient, factor, expected):
         ("2 or 3 eggs", "4 or 6 eggs"),
         ("1/2-1 cup milk", "1-2 cup milk"),
         ("½-1 cup milk", "1-2 cup milk"),
+        ("1 1/2-2 cups stock", "3-4 cups stock"),
+        ("1-1/2-2 cups stock", "3-4 cups stock"),  # hyphenated mixed as lower bound
     ],
 )
 def test_ranges_scale_both_bounds(ingredient, expected):
     assert _scale_one(ingredient) == ([expected], [])
+
+
+@pytest.mark.parametrize(
+    "ingredient, factor, expected",
+    [
+        # 29 digits, non-integer result: beyond Decimal's default 28-digit precision
+        (
+            "12345678901234567890123456789 g flour",
+            1.5,
+            "18518518351851851835185185183.5 g flour",
+        ),
+        ("1" + "0" * 40 + " g flour", 0.1, "1" + "0" * 39 + " g flour"),
+        ("1" + "0" * 40 + "/3 g flour", 2, "6" * 40 + ".67 g flour"),
+    ],
+)
+def test_huge_amounts_do_not_crash(ingredient, factor, expected):
+    assert _scale_one(ingredient, factor) == ([expected], [])
 
 
 @pytest.mark.parametrize("ingredient", ["salt to taste", "pepper", "a pinch of nutmeg", ""])
@@ -217,7 +241,15 @@ def test_ingredients_without_quantity_unchanged_and_not_flagged(ingredient):
         "12 oz (340 g) pasta",
         # malformed leftovers
         "2 1/2/3 cups",
+        "1 1⁄2⁄3 cups",
         "1-2-3 eggs",
+        # start like a number but can't be read as one
+        "1.2.3 cups",
+        "1/2/3 cups",
+        "1e3 g sugar",
+        # reversed range ("2 to 1") is not meaningful
+        "2-1 cups flour",
+        "1 1/2-1 cups flour",
     ],
 )
 def test_ambiguous_quantities_unchanged_and_flagged(ingredient):
