@@ -1,0 +1,1 @@
+NOT (orkestratör): Round 7'nin ilk denemesi Claude kullanım limiti yüzünden yarıda kaldı. O denemede yaptığın kısmi değişiklikler geri alındı; kod şu an round 6 halinde (commit 80b8886). Lütfen işe round 6 kodundan başla.
