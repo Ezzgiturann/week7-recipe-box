@@ -1,8 +1,22 @@
+import pytest
 from fastapi.testclient import TestClient
 
+import main
 from main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def temp_db(tmp_path, monkeypatch):
+    """Give every test its own empty database instead of the real recipes.db.
+
+    Merge resolution: agents A and B each added a fixture named temp_db at the
+    end of this file. Keeping both would let the second silently replace the
+    first, so the shopping-list tests would run against B's seeded recipes.
+    """
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "test.db")
+    main.init_db()
 
 
 def test_create_and_get_recipe():
@@ -30,17 +44,8 @@ def test_unknown_recipe_404():
     assert r.status_code == 404
 
 
+
 # --- Shopping list ---
-import pytest
-
-import main
-
-
-@pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    """Point the app at a throwaway SQLite file instead of the real recipes.db."""
-    monkeypatch.setattr(main, "DB_PATH", tmp_path / "test.db")
-    main.init_db()
 
 
 def _make(title, ingredients):
@@ -78,4 +83,60 @@ def test_shopping_list_unknown_id_404(temp_db):
 @pytest.mark.parametrize("query", ["?ids=", "?ids=1,abc", "?ids=1,,2", "?ids=-1", "?ids=1.5", ""])
 def test_shopping_list_bad_ids_422(temp_db, query):
     r = client.get(f"/shopping-list{query}")
+    assert r.status_code == 422
+
+
+# --- Tag filter ---
+
+
+@pytest.fixture
+def tagged_recipes():
+    """Seed four recipes for the tag-filter tests (on top of the empty temp_db)."""
+    client.post("/recipes", json={"title": "Pancakes", "tags": ["Breakfast", "sweet"]})
+    client.post("/recipes", json={"title": "Omelette", "tags": ["breakfast"]})
+    client.post("/recipes", json={"title": "Soup", "tags": ["dinner"]})
+    client.post("/recipes", json={"title": "Plain"})
+
+
+def _titles(resp):
+    return [rec["title"] for rec in resp.json()]
+
+
+def test_tag_filter_no_param_returns_all(tagged_recipes):
+    r = client.get("/recipes")
+    assert r.status_code == 200
+    assert _titles(r) == ["Pancakes", "Omelette", "Soup", "Plain"]
+
+
+def test_tag_filter_single_tag(tagged_recipes):
+    r = client.get("/recipes", params={"tag": "breakfast"})
+    assert r.status_code == 200
+    assert _titles(r) == ["Pancakes", "Omelette"]
+
+
+def test_tag_filter_case_insensitive(tagged_recipes):
+    r = client.get("/recipes", params={"tag": "BREAKFAST"})
+    assert r.status_code == 200
+    assert _titles(r) == ["Pancakes", "Omelette"]
+
+
+def test_tag_filter_multiple_tags_is_or(tagged_recipes):
+    r = client.get("/recipes", params=[("tag", "sweet"), ("tag", "dinner")])
+    assert r.status_code == 200
+    assert _titles(r) == ["Pancakes", "Soup"]
+
+
+def test_tag_filter_no_match_returns_empty_list(tagged_recipes):
+    r = client.get("/recipes", params={"tag": "dessert"})
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_tag_filter_empty_tag_is_422(tagged_recipes):
+    r = client.get("/recipes?tag=")
+    assert r.status_code == 422
+
+
+def test_tag_filter_empty_among_valid_is_422(tagged_recipes):
+    r = client.get("/recipes?tag=breakfast&tag=")
     assert r.status_code == 422

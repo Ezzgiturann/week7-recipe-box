@@ -15,6 +15,7 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -81,10 +82,20 @@ def create_recipe(recipe: RecipeIn):
 
 
 @app.get("/recipes")
-def list_recipes():
+def list_recipes(tag: Optional[list[str]] = Query(default=None)):
     with closing(get_db()) as conn:
         rows = conn.execute("SELECT * FROM recipes ORDER BY id").fetchall()
-    return [_row_to_recipe(r) for r in rows]
+    recipes = [_row_to_recipe(r) for r in rows]
+    if tag is None:
+        return recipes
+
+    wanted = {t.strip().casefold() for t in tag}
+    if "" in wanted:
+        raise HTTPException(status_code=422, detail="tag must not be empty")
+    return [
+        rec for rec in recipes
+        if any(t.strip().casefold() in wanted for t in rec["tags"])
+    ]
 
 
 @app.get("/recipes/{recipe_id}")
