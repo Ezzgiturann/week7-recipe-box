@@ -129,7 +129,9 @@ _QUANTITY_RE = re.compile(
     rf"(?P<low>{_NUMBER})"
     rf"(?:(?P<sep>\s*{_RANGE_SEP}\s*)(?P<high>{_NUMBER}))?"
     r"(?![\d/⁄.])",  # don't stop mid-token (e.g. "1.2.3", "1/2/3")
-    re.IGNORECASE,
+    # ASCII: \d is only 0-9 here. Other scripts' digits ("٢ cups") aren't read
+    # as a quantity, so _ANY_NUMBER_RE (Unicode \d) reports them as unscaled.
+    re.IGNORECASE | re.ASCII,
 )
 # Longer quantities are not real recipe amounts; refusing them also keeps us
 # clear of Python 3.11+'s 4300-digit int<->str limit (ValueError -> HTTP 500).
@@ -142,12 +144,35 @@ _MAX_QUANTITY_DIGITS = 100
 # reported instead of being scaled wrongly or passed off as "no quantity".
 _ANY_NUMBER_RE = re.compile(rf"[\d{_UNICODE_FRACTIONS}]")
 
+# The same rule for numbers written as words: "two eggs", "half a lemon",
+# "2 cups plus one tbsp". Like a stray digit, a number word anywhere means the
+# line may hold an amount we can't scale, so it is reported. Accepted cost:
+# "half-and-half" (the dairy product) and "cut in half" are reported too.
+_NUMBER_WORD_RE = re.compile(
+    r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    r"|dozens?|couple|half|halves|quarters?|thirds?)\b",
+    re.IGNORECASE,
+)
+
+# A unit followed by a container describes the container's size, not an
+# amount: "2 inch piece", "3 ounce can", "1 lb bag", "400 g tin".
+_SIZE_UNIT = (
+    r"(?:inch(?:es)?|in|cm|mm|ounces?|oz|pounds?|lbs?|g|grams?|kg"
+    r"|ml|l|lit(?:er|re)s?)"
+)
+_CONTAINER = (
+    r"(?:pieces?|cans?|tins?|jars?|bags?|box(?:es)?|packages?|packets?|pkgs?"
+    r"|blocks?|bottles?|cartons?|sticks?|chunks?|containers?|tubs?|slices?)"
+)
+
 # The leading number is there but is not an amount of the ingredient.
 _NOT_AN_AMOUNT_RE = re.compile(
     r"^(?:"
-    r"[-–]\s*[^\W\d_]"  # a size, not a count: "2-inch piece", "3-ounce can"
-    r"|\s*[%°]"         # a percentage / temperature: "70% cocoa", "180°C"
-    r")"
+    r"[-–]\s*[^\W\d_]"                              # size: "2-inch piece", "3-ounce can"
+    rf"|\s+{_SIZE_UNIT}\s+{_CONTAINER}\b"           # size: "2 inch piece", "3 ounce can"
+    r"|\s*(?:[%°]|percent\b|per\s+cent\b|degrees?\b)"  # "70% / 70 percent", "180°C / degrees"
+    r")",
+    re.IGNORECASE,
 )
 
 _MIXED_RE = re.compile(rf"(\d+)(?:\s+|-)(\d+){_SLASH}(\d+)")
@@ -160,7 +185,9 @@ def _parse_number(text: str) -> Optional[Fraction]:
     m = _MIXED_RE.fullmatch(text)
     if m:
         whole, num, den = map(int, m.groups())
-        return whole + Fraction(num, den) if den else None
+        # A real mixed number has a proper fraction part. "1-3/2" could just as
+        # well be the range 1 to 3/2, so improper parts are rejected as ambiguous.
+        return whole + Fraction(num, den) if 0 < den and num < den else None
     m = _FRACTION_RE.fullmatch(text)
     if m:
         num, den = map(int, m.groups())
@@ -208,8 +235,8 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
 
     Returns:
       * the scaled line;
-      * the line unchanged if it contains no digits or fractions at all
-        ("salt to taste", "a pinch of nutmeg");
+      * the line unchanged if it contains no digits, fractions or number
+        words at all ("salt to taste", "a pinch of nutmeg");
       * None if it can't be scaled safely. The caller reports these in
         "unscaled" instead of returning a wrong amount. Accepted limitations:
           - quantity not at the start: "flour 200 g", "Eggs: 2",
@@ -218,17 +245,25 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
             "1 cup plus 2 tbsp", "3 eggs or 4 egg whites", "12 oz (340 g)",
             "2 x 400 g cans", "2x3 cm", "1 2-inch piece", "1-2-3 eggs",
             "2 eggs, beaten in 1 bowl", "2 cans V8 juice"
+          - number words anywhere: "two eggs", "half a lemon",
+            "2 cups plus one tbsp", and as a side effect "1 cup half-and-half",
+            "1 lemon, cut in half"
           - decimal comma / thousands separator: "1,5 kg", "1,000 g"
-          - not an amount: "2-inch piece", "3-ounce can", "70% cocoa", "180°C"
+          - not an amount (a size, percentage or temperature): "2-inch piece",
+            "2 inch piece", "3-ounce can", "3 ounce can", "1 lb bag",
+            "70% cocoa", "70 percent cocoa", "180°C", "180 degrees"
+          - digits in other scripts: "٢ cups"
           - unreadable / invalid: "1.2.3 cups", "1/2/3", "1e3 g", "1/0 cup",
-            "-2 g", reversed range "2-1 cups", more than 100 digits
+            "-2 g", reversed range "2-1 cups", improper mixed number
+            "1-3/2" (range or 2 1/2?), more than 100 digits
 
-    Not detected (returned unchanged and *not* reported): amounts written as
-    words, e.g. "two eggs", "half a lemon"; in "2 cups plus one tbsp" only the
-    "2" is scaled. Ambiguous hyphens are read as mixed numbers: "2-3/4" is
-    2 3/4, not the range 2 to 3/4. Results keep 2 decimals (2 significant
-    digits below 1), so "1/8 tsp" becomes "0.13 tsp" even at factor 1.
+    Ambiguous hyphens with a proper fraction are read as mixed numbers:
+    "2-3/4" is 2 3/4, not the range 2 to 3/4. Results keep 2 decimals
+    (2 significant digits below 1), so "1/8 tsp" becomes "0.13 tsp" even at
+    factor 1.
     """
+    if _NUMBER_WORD_RE.search(ingredient):
+        return None
     match = _QUANTITY_RE.match(ingredient)
     if match is None:
         # No readable leading quantity: fine only if there's no number at all.
@@ -250,15 +285,18 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
     return match["lead"] + scaled + rest
 
 
-def _json_number(value: float) -> Union[int, float]:
-    """2.0 -> 2, 0.5 -> 0.5: no trailing ".0" in the JSON response."""
-    return int(value) if value.is_integer() else value
+def _json_number(value: Fraction) -> Union[int, float]:
+    """2 -> 2, 1/2 -> 0.5: no trailing ".0" in the JSON response."""
+    return value.numerator if value.denominator == 1 else float(value)
 
 
 @app.get("/recipes/{recipe_id}/scaled")
 def get_scaled_recipe(
     recipe_id: int,
-    factor: float = Query(..., gt=0, le=10, allow_inf_nan=False),
+    # Decimal, not float: the bounds are checked on the exact value, so
+    # "10.0000000000000001" is rejected instead of rounding to 10.0.
+    # max_digits bounds the work for inputs like "1e-999999" (still allows 1e-300).
+    factor: Decimal = Query(..., gt=0, le=10, allow_inf_nan=False, max_digits=400),
 ):
     """Recipe with ingredient quantities multiplied by `factor` (0 < factor <= 10).
 
@@ -267,8 +305,7 @@ def get_scaled_recipe(
     ("salt to taste") are unchanged by design and are not listed.
     """
     recipe = _fetch_recipe(recipe_id)
-    # str() first so 0.1 becomes exactly 1/10 instead of its binary float value.
-    exact_factor = Fraction(str(factor))
+    exact_factor = Fraction(factor)  # Decimal -> Fraction is exact: "0.1" is 1/10
     ingredients, unscaled = [], []
     # No special case for factor == 1: output format must not depend on the
     # factor ("2.0 cups" -> "2 cups" and "1/3" -> "0.33" for every factor).
@@ -280,7 +317,7 @@ def get_scaled_recipe(
         ingredients.append(scaled)
     return {
         **recipe,
-        "factor": _json_number(factor),
+        "factor": _json_number(exact_factor),
         "ingredients": ingredients,
         "unscaled": unscaled,
     }

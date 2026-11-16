@@ -351,15 +351,79 @@ def test_format_does_not_jump_between_close_factors():
 
 
 @pytest.mark.parametrize(
-    "ingredient, expected",
+    "ingredient",
     [
-        ("two eggs", "two eggs"),
-        ("half a lemon", "half a lemon"),
-        ("2 cups plus one tbsp flour", "4 cups plus one tbsp flour"),
+        "two eggs",
+        "Two eggs",
+        "half a lemon",
+        "a dozen eggs",
+        "2 cups plus one tbsp flour",  # previously half-scaled to "4 cups plus one tbsp"
+        "1 lemon, cut in half",  # accepted side effect: reported, not wrongly scaled
+        "1 cup half-and-half",  # accepted side effect (dairy product name)
     ],
 )
-def test_number_words_are_a_documented_limitation(ingredient, expected):
-    # Words aren't numbers to the parser: not scaled and not reported (see docstring).
+def test_number_words_are_reported(ingredient):
+    assert _scale_one(ingredient) == ([ingredient], [ingredient])
+
+
+@pytest.mark.parametrize(
+    "ingredient, expected",
+    [
+        # number words only match as whole words
+        ("1 bone-in chicken thigh", "2 bone-in chicken thigh"),  # "one" inside "bone"
+        ("2 tender steaks", "4 tender steaks"),  # "ten" inside "tender"
+        ("1 often-used pan", "2 often-used pan"),
+        ("2 honey crisp apples", "4 honey crisp apples"),
+    ],
+)
+def test_number_words_have_no_substring_false_positives(ingredient, expected):
+    assert _scale_one(ingredient) == ([expected], [])
+
+
+@pytest.mark.parametrize(
+    "ingredient",
+    [
+        # sizes written without a hyphen
+        "2 inch piece ginger",
+        "2 inches piece ginger",
+        "3 ounce can tuna",
+        "1 lb bag sugar",
+        "400 g tin tomatoes",
+        "3 cm pieces carrot",
+        # percentages / temperatures written as words
+        "70 percent dark chocolate",
+        "70 per cent dark chocolate",
+        "180 degrees oven",
+        "180 degree oven",
+        # digits from other scripts are not read as quantities
+        "٢ cups flour",
+        "2٢ cups flour",
+        # improper mixed numbers: "1 to 3/2" or "2 1/2"?
+        "1-3/2 cups flour",
+        "1 3/2 cups flour",
+    ],
+)
+def test_word_forms_of_non_amounts_are_reported(ingredient):
+    assert _scale_one(ingredient) == ([ingredient], [ingredient])
+
+
+@pytest.mark.parametrize(
+    "ingredient, expected",
+    [
+        # the unit is the amount itself when no container follows
+        ("3 ounces chocolate", "6 ounces chocolate"),
+        ("2 inches ginger", "4 inches ginger"),
+        ("200 g flour", "400 g flour"),
+        # a count of containers (no unit before the container) still scales
+        ("2 large cans tomatoes", "4 large cans tomatoes"),
+        ("2 cans tomatoes", "4 cans tomatoes"),
+        # "in" as a preposition, not after the number
+        ("2 carrots in pieces", "4 carrots in pieces"),
+        # proper mixed number with hyphen still scales
+        ("1-1/2 cups flour", "3 cups flour"),
+    ],
+)
+def test_size_and_percent_checks_have_no_false_positives(ingredient, expected):
     assert _scale_one(ingredient) == ([expected], [])
 
 
@@ -368,6 +432,21 @@ def test_tiny_factor_gives_exact_bounded_output():
     ingredients, unscaled = _scale_one("1 g saffron", 1e-300)
     assert ingredients == ["0." + "0" * 299 + "1 g saffron"]
     assert unscaled == []
+
+
+def test_factor_upper_bound_is_exact():
+    # Exactly 10 (in any spelling) is allowed; anything above it, however close, is not.
+    for factor in ["10", "10.0", "10.000000000000000000"]:
+        assert _scaled(_create(["1 onion"]), factor).status_code == 200
+    assert _scaled(_create(["1 onion"]), "10.0000000000000001").status_code == 422
+
+
+def test_high_precision_factor_is_exact():
+    # "1.0000000000000001" is beyond float precision (float gives exactly 1.0).
+    ingredients, _ = _scale_one("1 g salt", "1.0000000000000001")
+    assert ingredients == ["1 g salt"]  # rounded only at display, value stayed exact
+    ingredients, _ = _scale_one("10000000000000000 g salt", "1.0000000000000001")
+    assert ingredients == ["10000000000000001 g salt"]  # float would give 10000000000000000
 
 
 def test_recipe_with_no_ingredients():
@@ -382,7 +461,12 @@ def test_recipe_with_no_ingredients():
 
 @pytest.mark.parametrize(
     "factor",
-    ["0", "-0", "0.0", "-1", "-0.5", "10.01", "11", "abc", "", "nan", "inf", "1/2", "2x"],
+    [
+        "0", "-0", "0.0", "-1", "-0.5", "10.01", "11", "abc", "", "nan", "inf", "-inf",
+        "1/2", "2x",
+        "10.0000000000000001",  # would round to 10.0 as a float; checked exactly now
+        "1e-999999",  # positive but absurd: bounded by max_digits instead of a huge Fraction
+    ],
 )
 def test_invalid_factor_returns_422(factor):
     rid = _create(["200 g flour"])
