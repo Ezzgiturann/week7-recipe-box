@@ -132,9 +132,13 @@ _QUANTITY_RE = re.compile(
     r"(?![\d/⁄.])",  # don't stop mid-token (e.g. "1.2.3", "1/2/3")
     re.IGNORECASE,
 )
-# Starts like a quantity but _QUANTITY_RE can't read it ("1.2.3", "1/2/3"):
-# reported as unscaled rather than treated as "no quantity".
-_LOOKS_NUMERIC_RE = re.compile(rf"^\s*[\d{_UNICODE_FRACTIONS}]")
+# Starts like a quantity but _QUANTITY_RE can't read it ("1.2.3", "1/2/3",
+# "-2 g"): reported as unscaled rather than treated as "no quantity".
+_LOOKS_NUMERIC_RE = re.compile(rf"^\s*[-+−]?\s*\.?[\d{_UNICODE_FRACTIONS}]")
+
+# Longer quantities are not real recipe amounts; refusing them also keeps us
+# clear of Python 3.11+'s 4300-digit int<->str limit (ValueError -> HTTP 500).
+_MAX_QUANTITY_DIGITS = 100
 
 # Text right after the quantity that makes it ambiguous. Such lines are left
 # unchanged *and reported* in the response's "unscaled" list.
@@ -147,6 +151,8 @@ _AMBIGUOUS_AFTER_RE = re.compile(
     r"|\s*[x×]\s*\d"                           # dimensions / multipliers: "2x3 cm"
     rf"|\s*\d+{_SLASH}"                             # leftovers like "2 1/2/3", "1 1⁄2⁄3"
     r"|e[-+]?\d"                                    # scientific notation: "1e3 g"
+    r"|\s*[%°]"                                     # not an amount: "70% cocoa", "180°C"
+    r"|\s+\d+(?:\.\d+)?(?=\s|$)"                    # two bare numbers: "1 2 cups"
     r")",
     re.IGNORECASE,
 )
@@ -206,15 +212,17 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
     Returns:
       * the scaled line: "1/2 cup milk" x2 -> "1 cup milk", "1-2 cloves" x2 -> "2-4 cloves";
       * the line unchanged if it has no leading quantity ("salt to taste");
-      * None if it starts with a quantity that can't be scaled safely
-        ("1,5 kg", "2-inch piece", "12 oz (340 g)", "1/0 cup", "1.2.3 cups",
-        "2-1 cups"). The caller
-        reports these instead of silently returning a wrong amount.
+      * None if it starts with a quantity that can't be scaled safely, e.g.
+        "1,5 kg", "2-inch piece", "70% cocoa", "12 oz (340 g)", "1/0 cup",
+        "1.2.3 cups", "-2 g", "2-1 cups". The caller reports these instead of
+        silently returning a wrong amount.
     """
     match = _QUANTITY_RE.match(ingredient)
     if match is None:
         # "salt to taste" has no quantity; "1.2.3 cups" has an unreadable one.
         return None if _LOOKS_NUMERIC_RE.match(ingredient) else ingredient
+    if sum(c.isdigit() for c in match.group()) > _MAX_QUANTITY_DIGITS:
+        return None
     rest = ingredient[match.end():]
     if _AMBIGUOUS_AFTER_RE.match(rest) or _PAREN_QUANTITY_RE.search(rest):
         return None
@@ -247,19 +255,17 @@ def get_scaled_recipe(
     ("salt to taste") are unchanged by design and are not listed.
     """
     recipe = _fetch_recipe(recipe_id)
+    # str() first so 0.1 becomes exactly 1/10 instead of its binary float value.
+    exact_factor = Fraction(str(factor))
     ingredients, unscaled = [], []
-    if factor == 1:
-        # Identity: return the stored text verbatim (no "1/3" -> "0.33" rewrite).
-        ingredients = recipe["ingredients"]
-    else:
-        # str() first so 0.1 becomes exactly 1/10 instead of its binary float value.
-        exact_factor = Fraction(str(factor))
-        for line in recipe["ingredients"]:
-            scaled = scale_ingredient(line, exact_factor)
-            if scaled is None:
-                unscaled.append(line)
-                scaled = line
-            ingredients.append(scaled)
+    # No special case for factor == 1: output format must not depend on the
+    # factor ("2.0 cups" -> "2 cups" and "1/3" -> "0.33" for every factor).
+    for line in recipe["ingredients"]:
+        scaled = scale_ingredient(line, exact_factor)
+        if scaled is None:
+            unscaled.append(line)
+            scaled = line
+        ingredients.append(scaled)
     return {
         **recipe,
         "factor": _json_number(factor),

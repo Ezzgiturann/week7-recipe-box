@@ -250,6 +250,21 @@ def test_ingredients_without_quantity_unchanged_and_not_flagged(ingredient):
         # reversed range ("2 to 1") is not meaningful
         "2-1 cups flour",
         "1 1/2-1 cups flour",
+        # percentages / temperatures are not amounts
+        "70% dark chocolate",
+        "70 % dark chocolate",
+        "1.5% milk",
+        "180°C oven",
+        # negative amounts
+        "-2 g sugar",
+        "−2 g sugar",  # unicode minus
+        "-.5 cup oil",
+        # two bare numbers: which one is the count?
+        "1 2 cups flour",
+        "2 400 g cans tomatoes",
+        # absurdly long numbers (also Python 3.11+'s 4300-digit str<->int limit)
+        "1" * 5000 + " g flour",
+        "1/" + "3" * 5000 + " cup flour",
     ],
 )
 def test_ambiguous_quantities_unchanged_and_flagged(ingredient):
@@ -290,10 +305,28 @@ def test_mixed_ingredient_list_preserves_order_and_flags_only_ambiguous():
     assert body["unscaled"] == ["1,5 kg un"]
 
 
-@pytest.mark.parametrize("ingredient", ["1/3 cup sugar", "2.0 cups rice", "1,5 kg un"])
-def test_factor_one_is_identity(ingredient):
-    # Nothing is scaled, so nothing is rewritten or flagged.
-    assert _scale_one(ingredient, 1) == ([ingredient], [])
+@pytest.mark.parametrize(
+    "ingredient, ingredients, unscaled",
+    [
+        ("2.0 cups rice", ["2 cups rice"], []),  # trailing-zero rule holds at factor 1 too
+        ("1/3 cup sugar", ["0.33 cup sugar"], []),  # same format as factor 1.0001
+        ("200 g flour", ["200 g flour"], []),
+        ("1,5 kg un", ["1,5 kg un"], ["1,5 kg un"]),  # flagged consistently
+    ],
+)
+def test_factor_one_uses_same_rules_as_any_factor(ingredient, ingredients, unscaled):
+    assert _scale_one(ingredient, 1) == (ingredients, unscaled)
+
+
+def test_format_does_not_jump_between_close_factors():
+    assert _scale_one("1/3 cup sugar", 1)[0] == _scale_one("1/3 cup sugar", 1.0001)[0]
+
+
+def test_tiny_factor_gives_exact_bounded_output():
+    # 1e-300 is a valid factor (> 0); the result is exact, not "0" or "1e-300".
+    ingredients, unscaled = _scale_one("1 g saffron", 1e-300)
+    assert ingredients == ["0." + "0" * 299 + "1 g saffron"]
+    assert unscaled == []
 
 
 def test_recipe_with_no_ingredients():
