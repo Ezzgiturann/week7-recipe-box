@@ -124,7 +124,6 @@ _NUMBER = (
 )
 
 # A leading quantity, optionally a range ("1-2", "1 to 2", "2 or 3").
-# Only the *leading* quantity is scaled: "2 eggs, beaten in 1 bowl" -> "4 eggs, ...".
 _QUANTITY_RE = re.compile(
     r"^(?P<lead>\s*)"
     rf"(?P<low>{_NUMBER})"
@@ -140,24 +139,19 @@ _LOOKS_NUMERIC_RE = re.compile(rf"^\s*[-+−]?\s*\.?[\d{_UNICODE_FRACTIONS}]")
 # clear of Python 3.11+'s 4300-digit int<->str limit (ValueError -> HTTP 500).
 _MAX_QUANTITY_DIGITS = 100
 
-# Text right after the quantity that makes it ambiguous. Such lines are left
-# unchanged *and reported* in the response's "unscaled" list.
-_AMBIGUOUS_AFTER_RE = re.compile(
+# General rule: any digit or fraction left *after* the supported leading
+# quantity means a second number we don't understand ("1 lb 4 oz", "12 oz
+# (340 g)", "1,5 kg", "2x3 cm", "1-2-3"). Scaling only the first number would
+# give a wrong amount, so the line is reported instead.
+_SECOND_NUMBER_RE = re.compile(rf"[\d{_UNICODE_FRACTIONS}]")
+
+# The leading number is there but is not an amount of the ingredient.
+_NOT_AN_AMOUNT_RE = re.compile(
     r"^(?:"
-    r",\d"                                          # "1,5 kg" (decimal comma?) / "1,000 g"
-    rf"|\s*[{_UNICODE_FRACTIONS}]"                  # "1.5½"
-    r"|[-–]\s*[^\W\d_]"                        # a size, not a count: "2-inch", "3-ounce"
-    rf"|\s*{_RANGE_SEP}\s*[\d.{_UNICODE_FRACTIONS}]"  # three-part "1-2-3"
-    r"|\s*[x×]\s*\d"                           # dimensions / multipliers: "2x3 cm"
-    rf"|\s*\d+{_SLASH}"                             # leftovers like "2 1/2/3", "1 1⁄2⁄3"
-    r"|e[-+]?\d"                                    # scientific notation: "1e3 g"
-    r"|\s*[%°]"                                     # not an amount: "70% cocoa", "180°C"
-    r"|\s+\d+(?:\.\d+)?(?=\s|$)"                    # two bare numbers: "1 2 cups"
-    r")",
-    re.IGNORECASE,
+    r"[-–]\s*[^\W\d_]"  # a size, not a count: "2-inch piece", "3-ounce can"
+    r"|\s*[%°]"         # a percentage / temperature: "70% cocoa", "180°C"
+    r")"
 )
-# A second quantity in parentheses, e.g. "12 oz (340 g) pasta".
-_PAREN_QUANTITY_RE = re.compile(r"\(\s*[\d.]")
 
 _MIXED_RE = re.compile(rf"(\d+)(?:\s+|-)(\d+){_SLASH}(\d+)")
 _FRACTION_RE = re.compile(rf"(\d+){_SLASH}(\d+)")
@@ -209,13 +203,25 @@ def _format_quantity(value: Fraction) -> str:
 def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
     """Scale the leading quantity (or range) of an ingredient line.
 
+    Supported leading quantities (scaled, x2 shown):
+      integer/decimal  "200 g" -> "400 g", "1.5 tsp" -> "3 tsp", ".5 cup" -> "1 cup"
+      fraction         "1/2 cup" -> "1 cup", "1⁄2 cup" -> "1 cup", "½ cup" -> "1 cup"
+      mixed number     "1 1/2", "1-1/2", "1½", "1 ½" -> "3"
+      range            "1-2" -> "2-4", "1 to 2" -> "2 to 4", "2 or 3" -> "4 or 6"
+
     Returns:
-      * the scaled line: "1/2 cup milk" x2 -> "1 cup milk", "1-2 cloves" x2 -> "2-4 cloves";
+      * the scaled line;
       * the line unchanged if it has no leading quantity ("salt to taste");
-      * None if it starts with a quantity that can't be scaled safely, e.g.
-        "1,5 kg", "2-inch piece", "70% cocoa", "12 oz (340 g)", "1/0 cup",
-        "1.2.3 cups", "-2 g", "2-1 cups". The caller reports these instead of
-        silently returning a wrong amount.
+      * None if it can't be scaled safely. The caller reports these in
+        "unscaled" instead of returning a wrong amount. Accepted limitations:
+          - another number after the quantity: "1 lb 4 oz beef",
+            "1 cup plus 2 tbsp", "3 eggs or 4 egg whites", "12 oz (340 g)",
+            "2 x 400 g cans", "2x3 cm", "1 2-inch piece", "1-2-3 eggs",
+            "2 eggs, beaten in 1 bowl", "2 cans V8 juice"
+          - decimal comma / thousands separator: "1,5 kg", "1,000 g"
+          - not an amount: "2-inch piece", "3-ounce can", "70% cocoa", "180°C"
+          - unreadable / invalid: "1.2.3 cups", "1/2/3", "1e3 g", "1/0 cup",
+            "-2 g", reversed range "2-1 cups", more than 100 digits
     """
     match = _QUANTITY_RE.match(ingredient)
     if match is None:
@@ -224,7 +230,7 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> Optional[str]:
     if sum(c.isdigit() for c in match.group()) > _MAX_QUANTITY_DIGITS:
         return None
     rest = ingredient[match.end():]
-    if _AMBIGUOUS_AFTER_RE.match(rest) or _PAREN_QUANTITY_RE.search(rest):
+    if _SECOND_NUMBER_RE.search(rest) or _NOT_AN_AMOUNT_RE.match(rest):
         return None
     low = _parse_number(match["low"])
     high = _parse_number(match["high"]) if match["high"] else None

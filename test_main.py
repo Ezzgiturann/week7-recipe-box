@@ -1,4 +1,5 @@
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -12,7 +13,10 @@ _REAL_DB = Path(__file__).parent / "recipes.db"
 
 
 def _real_db_state():
-    return _REAL_DB.stat().st_mtime_ns if _REAL_DB.exists() else None
+    """(mtime, content hash) of the real DB, or None if it doesn't exist."""
+    if not _REAL_DB.exists():
+        return None
+    return _REAL_DB.stat().st_mtime_ns, hashlib.sha256(_REAL_DB.read_bytes()).hexdigest()
 
 
 _REAL_DB_STATE_BEFORE = _real_db_state()
@@ -265,6 +269,16 @@ def test_ingredients_without_quantity_unchanged_and_not_flagged(ingredient):
         # absurdly long numbers (also Python 3.11+'s 4300-digit str<->int limit)
         "1" * 5000 + " g flour",
         "1/" + "3" * 5000 + " cup flour",
+        # compound quantities: a second amount later in the line
+        "1 lb 4 oz beef",
+        "1 cup plus 2 tbsp flour",
+        "3 eggs or 4 egg whites",
+        "1/2 cup (120 ml) milk",
+        "½ cup plus ½ tbsp butter",  # unicode fraction as the second number
+        # accepted limitation of the general rule: any later number counts
+        "1 2-inch piece ginger",
+        "2 eggs, beaten in 1 bowl",
+        "2 cans V8 juice",
     ],
 )
 def test_ambiguous_quantities_unchanged_and_flagged(ingredient):
@@ -281,10 +295,10 @@ def test_ambiguous_quantities_unchanged_and_flagged(ingredient):
         ("2 xl eggs", "4 xl eggs"),
         ("2 eggs, beaten", "4 eggs, beaten"),
         ("1/2 cup milk (whole)", "1 cup milk (whole)"),
-        # count followed by a size: only the count scales
-        ("1 2-inch piece ginger", "2 2-inch piece ginger"),
-        # only the leading quantity is scaled
-        ("2 eggs, beaten in 1 bowl", "4 eggs, beaten in 1 bowl"),
+        # numbers that belong to the supported quantity itself are not "second numbers"
+        ("1 1/2-2 cups stock", "3-4 cups stock"),
+        ("2 TO 3 eggs", "4 TO 6 eggs"),  # range separator is case-insensitive
+        ("1 OR 2 onions", "2 OR 4 onions"),
     ],
 )
 def test_ambiguity_check_has_no_false_positives(ingredient, expected):
@@ -339,10 +353,17 @@ def test_recipe_with_no_ingredients():
 # --- scaling: validation ------------------------------------------------------
 
 
-@pytest.mark.parametrize("factor", ["0", "-1", "-0.5", "10.01", "11", "abc", "", "nan", "inf"])
+@pytest.mark.parametrize(
+    "factor",
+    ["0", "-0", "0.0", "-1", "-0.5", "10.01", "11", "abc", "", "nan", "inf", "1/2", "2x"],
+)
 def test_invalid_factor_returns_422(factor):
     rid = _create(["200 g flour"])
     assert _scaled(rid, factor).status_code == 422
+
+
+def test_non_numeric_recipe_id_returns_422():
+    assert client.get("/recipes/abc/scaled", params={"factor": 2}).status_code == 422
 
 
 def test_missing_factor_returns_422():
