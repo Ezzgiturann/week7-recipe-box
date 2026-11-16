@@ -64,8 +64,10 @@ Every round's output is saved as text:
 | 4 | [`ce17178`](https://github.com/Ezzgiturann/week7-recipe-box/commit/ce17178) | 105 passed | FAIL | PASS | PASS | `70%`, `180°C` scaled; 4300-digit amounts → 500; `-2 g` not flagged | `1-1/2` fixed; `⁄` slash; large numbers no longer crash |
 | 5 | [`52a3ded`](https://github.com/Ezzgiturann/week7-recipe-box/commit/52a3ded) | 119 passed | FAIL | PASS | PASS | `"1 lb 4 oz"`, `"1 cup plus 2 tbsp"` scaled only by the first number, not reported; warns that 9 regexes form a fragile blacklist | % / ° excluded; 100-digit cap; signs flagged |
 | 6 | [`80b8886`](https://github.com/Ezzgiturann/week7-recipe-box/commit/80b8886) | 133 passed | FAIL | PASS | PASS | Amounts not at the start (`"flour 200 g"`, `"Eggs: 2"`) are silently skipped | **Human decision applied:** one general rule (any second number → `unscaled`) replaced 8 special-case regexes; limitations documented in the docstring |
+| 7 | [`93c416d`](https://github.com/Ezzgiturann/week7-recipe-box/commit/93c416d) | 148 passed | FAIL | PASS | PASS | Only the symbol spellings are caught: `"70%"` and `"2-inch"` are reported, but `"70 percent"` → `"140 percent"` and `"2 inch"` → `"4 inch"` are not; `"two eggs"` silently unchanged | Numbers anywhere in the line are now checked, not only at the start |
+| 8 | [`4616de9`](https://github.com/Ezzgiturann/week7-recipe-box/commit/4616de9) | 182 passed | FAIL | PASS | PASS | `"9 inch pie crust"` → `"18 inch"` (the unhyphenated-size rule only covers a container word list); number words stop at "twelve", so `"twenty eggs"` is not reported | Word forms (`percent`, `degrees`, `inch`, `ounce`) and number words (one–twelve, dozen, half) are now reported in `unscaled` |
 
-**That is 5 revision rounds (2–6), and every one answers the critic's previous report point by point.** The generator did not accept every point. In round 3 it kept `factor=1` returning the text unchanged, and in round 4 it kept `"2 3 eggs"` as is, and it explained why each time. A short excerpt from round 1:
+**That is 7 revision rounds (2–8), and every one answers the critic's previous report point by point.** The generator did not accept every point. In round 3 it kept `factor=1` returning the text unchanged, and in round 4 it kept `"2 3 eggs"` as is, and it explained why each time. A short excerpt from round 1:
 
 > **Critic (round 1):** `"1,5 kg un"` with factor 2 → `"2,5 kg un"` … Turkish recipes use a comma as the decimal separator, so the user would get 40% less without any error. **VERDICT: REVISE**
 >
@@ -79,9 +81,17 @@ After 5 rounds, Tests and Clarity had passed since round 3. Only Correctness kep
 In round 6 the generator replaced 8 special-case regexes with one rule. The critic accepted the reported limitations, but still found a silently wrong case: amounts that are not at the start of the line (`"flour 200 g"`). Under my acceptance criterion this was a valid FAIL.
 
 ### How it ended – the critic did not sign off
-- **Round 7 hit the Claude usage limit.** The generator stopped after a partial edit, and the critic returned no verdict (`"You've hit your 5-hour limit"`, see `round7-*.jsonl`). The loop script committed that partial edit.
+- **The first attempt at round 7 hit the Claude usage limit.** The generator stopped after a partial edit, and the critic returned no verdict (`"You've hit your 5-hour limit"`, see `round7-limit-hit-*`). The loop script committed that partial edit.
 - **I removed it from the delivered code.** The scaling branch was reset to round 6, and the partial commit is kept for transparency on branch [`task-c/round7-partial-unreviewed`](https://github.com/Ezzgiturann/week7-recipe-box/tree/task-c/round7-partial-unreviewed). An earlier attempt to revert it with `git revert -q` failed silently, because `revert` has no `-q` option. The `--amend` that followed then reworded the partial commit instead of reverting it. I caught this before merging, by checking the diff against round 6.
-- **The merged code is round 6:** 133 scaling tests, 150 in total after the merge. **The critic never gave `APPROVE`.** The open finding is that amounts not at the start of a line (`"flour 200 g"`, `"Eggs: 2"`, `"about 2 cups"`) are not scaled and not reported in `unscaled`.
+- **After the limit reset I reran rounds 7–8** ([`run_loop_restart.sh`](agent-logs/loop/run_loop_restart.sh)). The same generator session was resumed with a note that its partial round-7 edit had been discarded and the code was back at round 6. The human decision and the critic's acceptance criterion stayed the same.
+- **The loop stopped at its round limit (8), and the critic never gave `APPROVE`.** From round 3 on, Tests and Clarity passed every round. Correctness failed every round, each time on a rarer way of writing the same thing:
+  - `%` → `percent`
+  - `2-inch` → `2 inch` → `9 inch pie crust`
+  - `two` → `twenty`
+
+  The open finding in the delivered code (round 8) is that unhyphenated sizes followed by a word outside the container list (`"9 inch pie crust"`) and number words above twelve (`"twenty eggs"`) are scaled or left unchanged without being reported.
+- **The merged code is round 8:** 182 scaling tests, 199 in total after the merge.
+- **Observation:** the critic was not being unfair. Each finding matched my acceptance criterion ("no silently wrong result"). The problem is that free-text ingredient lines have no closed definition, so a blacklist of "unsafe" patterns can always be extended by another spelling. Getting a sign-off would need a narrower contract, for example scaling only lines that match one strict grammar and reporting everything else, rather than more revision rounds.
 - **Merging this branch hit the same collision as Part I.** The generator was a third agent unaware of the others, and it also wrote an autouse fixture named `temp_db`. It had also moved `get_recipe`'s body into `_fetch_recipe`, at the exact spot where agent A had added the shopping list. I resolved both in [`29eac97`](https://github.com/Ezzgiturann/week7-recipe-box/commit/29eac97).
 
 ## 3. Autonomy levels and supervision
